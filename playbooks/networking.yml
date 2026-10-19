@@ -1,0 +1,49 @@
+---
+- name: Configure Kubernetes node networking
+  hosts: network_new
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Verify required interfaces exist
+      ansible.builtin.command: >
+        ip link show {{ item }}
+      loop:
+        - enp0s1
+        - enp0s2
+      changed_when: false
+
+    - name: Back up original Netplan
+      ansible.builtin.copy:
+        src: /etc/netplan/00-installer-config.yaml
+        dest: /etc/netplan/00-installer-config.yaml.bak
+        remote_src: true
+        force: false
+
+    - name: Deploy Netplan template
+      ansible.builtin.template:
+        src: ../templates/netplan.yaml.j2
+        dest: /etc/netplan/00-installer-config.yaml
+        owner: root
+        group: root
+        mode: '0600'
+      register: netplan_config
+
+    - name: Validate Netplan syntax
+      ansible.builtin.command: netplan generate
+      changed_when: false
+
+    - name: Apply network configuration
+      ansible.builtin.command: netplan apply
+      when: netplan_config.changed
+
+    - name: Verify Kubernetes IP is assigned
+      ansible.builtin.command: >
+        ip -4 addr show dev enp0s1
+      register: ip_result
+      changed_when: false
+      failed_when: node_ip not in ip_result.stdout
+
+    - name: Display assigned IP
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} configured as {{ node_ip }}"

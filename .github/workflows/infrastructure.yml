@@ -1,0 +1,24 @@
+name: Kubernetes Infrastructure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: [self-hosted, macOS]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Ansible
+        run: ansible --version
+
+      - name: List Kubernetes nodes
+        run: ansible -i inventory/hosts.ini k8s --list-hosts
+
+      - name: Test SSH connectivity
+        run: ansible -i inventory/hosts.ini k8s -m ping

@@ -1,0 +1,34 @@
+---
+- name: Generate Kubernetes join command
+  hosts: control1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Create temporary join token
+      ansible.builtin.command: kubeadm token create --ttl 30m --print-join-command
+      register: join_command
+      no_log: true
+
+- name: Join Kubernetes workers
+  hosts: workers
+  become: true
+  gather_facts: false
+  serial: 1
+
+  tasks:
+    - name: Check existing kubelet configuration
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_config
+
+    - name: Check for existing membership
+      ansible.builtin.assert:
+        that:
+          - not kubelet_config.stat.exists or inventory_hostname == 'worker3'
+        fail_msg: "{{ inventory_hostname }} has existing kubelet configuration. Migrate its old membership before joining."
+
+    - name: Join unconfigured workers
+      ansible.builtin.command:
+        argv: "{{ hostvars['control1'].join_command.stdout.split() + ['--node-name', inventory_hostname] }}"
+      when: not kubelet_config.stat.exists
+      no_log: true

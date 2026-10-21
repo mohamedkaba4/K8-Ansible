@@ -1,0 +1,55 @@
+---
+- name: Install containerd on new nodes
+  hosts: new_control:new_workers
+  become: true
+
+  tasks:
+    - name: Install containerd
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+        update_cache: true
+
+    - name: Create containerd configuration directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    - name: Check containerd configuration
+      ansible.builtin.stat:
+        path: /etc/containerd/config.toml
+      register: containerd_config
+
+    - name: Generate default containerd configuration
+      ansible.builtin.command: containerd config default
+      register: default_config
+      changed_when: false
+      when: not containerd_config.stat.exists
+
+    - name: Write default configuration
+      ansible.builtin.copy:
+        content: "{{ default_config.stdout }}\n"
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+      when: not containerd_config.stat.exists
+      notify: Restart containerd
+
+    - name: Enable systemd cgroups
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+
+    - name: Enable and start containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted

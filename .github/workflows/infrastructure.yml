@@ -17,8 +17,24 @@ jobs:
       - name: Verify Ansible
         run: ansible --version
 
-      - name: List Kubernetes nodes
-        run: ansible -i inventory/hosts.ini k8s --list-hosts
-
       - name: Test SSH connectivity
-        run: ansible -i inventory/hosts.ini k8s -m ping
+        run: |
+          ansible -i inventory/hosts.ini k8s -m ping
+
+      - name: Verify Kubernetes nodes
+        run: |
+          ansible -i inventory/hosts.ini control1 \
+            -b -m command \
+            -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes -o wide'
+
+      - name: Validate node readiness
+        run: |
+          ansible -i inventory/hosts.ini control1 \
+            -b -m command \
+            -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=60s'
+
+      - name: Validate Flannel
+        run: |
+          ansible -i inventory/hosts.ini control1 \
+            -b -m command \
+            -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=120s'

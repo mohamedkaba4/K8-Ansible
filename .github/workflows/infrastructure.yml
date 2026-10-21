@@ -2,13 +2,29 @@ name: Kubernetes Infrastructure
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Infrastructure operation
+        required: true
+        type: choice
+        default: validate
+        options:
+          - validate
+          - provision
+          - join-worker
+      target_worker:
+        description: "Target worker (e.g. worker5). Required for provision/join."
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  validate:
+  infrastructure:
     runs-on: [self-hosted, macOS]
+    env:
+      TARGET: ${{ inputs.target_worker }}
 
     steps:
       - name: Checkout repository
@@ -17,24 +33,66 @@ jobs:
       - name: Verify Ansible
         run: ansible --version
 
-      - name: Test SSH connectivity
+      - name: Validate target
+        if: inputs.operation != 'validate'
+        shell: bash
         run: |
-          ansible -i inventory/hosts.ini k8s -m ping
+          [[ "$TARGET" =~ ^[a-z][a-z0-9-]*$ ]] || exit 1
+
+          GROUP=workers
+          if [[ "${{ inputs.operation }}" == "provision" ]]; then
+            GROUP=new_workers
+          fi
+
+          ansible -i inventory/hosts.ini "$GROUP" --list-hosts \
+            | sed '1d' | tr -d ' ' | grep -Fxq "$TARGET" || {
+              echo "Target is not in inventory group: $GROUP"
+              exit 1
+            }
+
+      - name: Check SSH connectivity
+        if: inputs.operation == 'validate'
+        run: |
+          ansible -i inventory/hosts.ini \
+            'existing_control:workers' -m ping
 
       - name: Verify Kubernetes nodes
+        if: inputs.operation == 'validate'
         run: |
           ansible -i inventory/hosts.ini control1 \
             -b -m command \
             -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes -o wide'
 
       - name: Validate node readiness
+        if: inputs.operation == 'validate'
         run: |
           ansible -i inventory/hosts.ini control1 \
             -b -m command \
             -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=60s'
 
       - name: Validate Flannel
+        if: inputs.operation == 'validate'
         run: |
           ansible -i inventory/hosts.ini control1 \
             -b -m command \
             -a 'kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-flannel rollout status daemonset/kube-flannel-ds --timeout=120s'
+
+      - name: Check worker is not already initialized
+        if: inputs.operation == 'provision'
+        run: |
+          ansible -i inventory/hosts.ini "$TARGET" \
+            -m command \
+            -a 'test ! -e /etc/kubernetes/kubelet.conf'
+
+      - name: Provision selected worker
+        if: inputs.operation == 'provision'
+        run: |
+          ansible-playbook -i inventory/hosts.ini provision.yml \
+            --limit "$TARGET"
+
+      - name: Join selected worker
+        if: inputs.operation == 'join-worker'
+        run: |
+          ansible-playbook -i inventory/hosts.ini \
+            playbooks/join-workers.yml \
+            -e "target_worker=$TARGET"

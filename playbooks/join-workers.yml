@@ -1,19 +1,39 @@
 ---
-- name: Generate Kubernetes join command
+- name: Prepare worker join
   hosts: control1
   become: true
   gather_facts: false
+
   tasks:
-    - name: Create temporary join token
+    - name: Verify target is a worker
+      ansible.builtin.assert:
+        that:
+          - target_worker is defined
+          - target_worker in groups['workers']
+        fail_msg: "Select a valid worker from inventory."
+
+    - name: Check whether node is registered
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - get
+          - node
+          - "{{ target_worker }}"
+      register: node_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Generate temporary join command
       ansible.builtin.command: kubeadm token create --ttl 30m --print-join-command
       register: join_command
+      when: node_lookup.rc != 0
       no_log: true
 
-- name: Join Kubernetes workers
-  hosts: workers
+- name: Join selected worker
+  hosts: "{{ target_worker }}"
   become: true
   gather_facts: false
-  serial: 1
 
   tasks:
     - name: Check existing kubelet configuration
@@ -21,14 +41,43 @@
         path: /etc/kubernetes/kubelet.conf
       register: kubelet_config
 
-    - name: Check for existing membership
+    - name: Prevent conflicting cluster membership
       ansible.builtin.assert:
         that:
-          - not kubelet_config.stat.exists or inventory_hostname == 'worker3'
-        fail_msg: "{{ inventory_hostname }} has existing kubelet configuration. Migrate its old membership before joining."
+          - not kubelet_config.stat.exists
+        fail_msg: "Kubelet configuration already exists. Do not reset automatically."
+      when: hostvars['control1'].node_lookup.rc != 0
 
-    - name: Join unconfigured workers
+    - name: Get Tailscale IP
+      ansible.builtin.command: tailscale ip -4
+      register: tailscale_ip
+      changed_when: false
+      when: hostvars['control1'].node_lookup.rc != 0
+
+    - name: Configure kubelet node IP
+      ansible.builtin.lineinfile:
+        path: /etc/default/kubelet
+        regexp: '^KUBELET_EXTRA_ARGS='
+        line: "KUBELET_EXTRA_ARGS=--node-ip={{ tailscale_ip.stdout | trim }}"
+        create: true
+        mode: '0644'
+      when: hostvars['control1'].node_lookup.rc != 0
+
+    - name: Configure Kubernetes API hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^[^#]*\s+k8-api\.lab(\s|$)'
+        line: "{{ hostvars['control1'].ansible_host }} k8-api.lab"
+        state: present
+      when: hostvars['control1'].node_lookup.rc != 0
+
+    - name: Join Kubernetes cluster
       ansible.builtin.command:
         argv: "{{ hostvars['control1'].join_command.stdout.split() + ['--node-name', inventory_hostname] }}"
-      when: not kubelet_config.stat.exists
+      when: hostvars['control1'].node_lookup.rc != 0
       no_log: true
+
+    - name: Report already registered node
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is already registered. Skipping join."
+      when: hostvars['control1'].node_lookup.rc == 0
